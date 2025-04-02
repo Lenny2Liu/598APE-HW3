@@ -74,6 +74,7 @@ int main(int argc, const char** argv){
 
    Planet* planets = (Planet*)malloc(sizeof(Planet) * nplanets);
    Planet* buffer = (Planet*)malloc(sizeof(Planet) * nplanets);
+   #pragma omp parallel
    for (int i=0; i<nplanets; i++) {
       planets[i].mass = randomDouble() + 0.1;
       planets[i].x = randomDouble() * 100 - 50;
