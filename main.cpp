@@ -1,7 +1,7 @@
 #include<stdio.h>
 #include<stdlib.h>
 #include<math.h>
-
+#include <omp.h>
 #include <sys/time.h>
 
 float tdiff(struct timeval *start, struct timeval *end) {
@@ -39,32 +39,28 @@ int timesteps;
 double dt;
 double G;
 
-Planet* next(Planet* planets) {
-   Planet* nextplanets = (Planet*)malloc(sizeof(Planet) * nplanets);
-   for (int i=0; i<nplanets; i++) {
-      nextplanets[i].vx = planets[i].vx;
-      nextplanets[i].vy = planets[i].vy;
-      nextplanets[i].mass = planets[i].mass;
-      nextplanets[i].x = planets[i].x;
-      nextplanets[i].y = planets[i].y;
+void update_planets(Planet* in, Planet* out) {
+   #pragma omp parallel for
+   for (int i = 0; i < nplanets; i++) {
+      out[i] = in[i];
    }
-
-   for (int i=0; i<nplanets; i++) {
-      for (int j=0; j<nplanets; j++) {
-         double dx = planets[j].x - planets[i].x;
-         double dy = planets[j].y - planets[i].y;
-         double distSqr = dx*dx + dy*dy + 0.0001;
-         double invDist = planets[i].mass * planets[j].mass / sqrt(distSqr);
+   #pragma omp parallel for
+   // for nplanets > #threads.
+   for (int i = 0; i < nplanets; i++) {
+      for (int j = 0; j < nplanets; j++) {
+         double dx = in[j].x - in[i].x;
+         double dy = in[j].y - in[i].y;
+         double distSqr = dx * dx + dy * dy + 0.0001;  // prevent divide-by-zero
+         double invDist = in[i].mass * in[j].mass / sqrt(distSqr);
          double invDist3 = invDist * invDist * invDist;
-         nextplanets[i].x += dx * invDist3;
-         nextplanets[i].y += dy * invDist3;
+         out[i].x += dx * invDist3;
+         out[i].y += dy * invDist3;
       }
-      nextplanets[i].x += dt * nextplanets[i].vx;
-      nextplanets[i].y += dt * nextplanets[i].vy;
+      out[i].x += dt * out[i].vx;
+      out[i].y += dt * out[i].vy;
    }
-   free(planets);
-   return nextplanets;
 }
+
 
 int main(int argc, const char** argv){
    if (argc < 2) {
@@ -77,6 +73,7 @@ int main(int argc, const char** argv){
    G = 6.6743;
 
    Planet* planets = (Planet*)malloc(sizeof(Planet) * nplanets);
+   Planet* buffer = (Planet*)malloc(sizeof(Planet) * nplanets);
    for (int i=0; i<nplanets; i++) {
       planets[i].mass = randomDouble() + 0.1;
       planets[i].x = randomDouble() * 100 - 50;
@@ -88,11 +85,18 @@ int main(int argc, const char** argv){
    struct timeval start, end;
    gettimeofday(&start, NULL);
    for (int i=0; i<timesteps; i++) {
-      planets = next(planets);
+      update_planets(planets, buffer);
       //printf("x=%f y=%f\n", planets[nplanets-1].x, planets[nplanets-1].y);
+      Planet* temp = planets;
+      planets = buffer;
+      buffer = temp;
+      if (i % 10000 == 0) {
+         printf("Timestep %d, location %f %f\n", i/10000, planets[nplanets-1].x, planets[nplanets-1].y);
+      }
    }
    gettimeofday(&end, NULL);
    printf("Total time to run simulation %0.6f seconds, final location %f %f\n", tdiff(&start, &end), planets[nplanets-1].x, planets[nplanets-1].y);
-
+   free(planets);
+   free(buffer);
    return 0;   
 }
