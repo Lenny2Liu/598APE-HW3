@@ -1,6 +1,6 @@
-CXX      := clang++
-CXXFLAGS := -O3 -g -Werror -std=c++17 -fopenmp
-LDFLAGS  := -lm
+CXX = clang++
+CXXFLAGS = -O3 -g -std=c++17 -Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include -march=native
+LDFLAGS = -L/opt/homebrew/opt/libomp/lib -lomp -lm
 
 
 OBJ_DIR   := bin
