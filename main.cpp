@@ -4,235 +4,133 @@
 #include <omp.h>
 #include <sys/time.h>
 
-float tdiff(struct timeval *start, struct timeval *end) {
-  return (end->tv_sec-start->tv_sec) + 1e-6*(end->tv_usec-start->tv_usec);
+static unsigned long long seed = 100ULL;
+
+static unsigned long long randomU64() {
+    seed ^= (seed << 21);
+    seed ^= (seed >> 35);
+    seed ^= (seed << 4);
+    return seed;
 }
-
-struct Planet {
-   double mass;
-   double x;
-   double y;
-   double vx;
-   double vy;
-};
-
-unsigned long long seed = 100;
-
-unsigned long long randomU64() {
-  seed ^= (seed << 21);
-  seed ^= (seed >> 35);
-  seed ^= (seed << 4);
-  return seed;
-}
-
-double randomDouble() {
+static double randomDouble() {
     unsigned long long a = randomU64() >> (64 - 26);
     unsigned long long b = randomU64() >> (64 - 26);
-    return ((a << 27) + b) / (double)(1LL << 53);
+    return ((a << 27) + b) / (double)(1ULL << 53);
 }
 
-typedef struct QuadNode {
-    double xmid;
-    double ymid;
-    double half_size;
-    double mass;
-    double cm_x;
-    double cm_y;
-    int bodyIndex;
-    struct QuadNode* NW;
-    struct QuadNode* NE;
-    struct QuadNode* SW;
-    struct QuadNode* SE;
-} QuadNode;
-
-
-QuadNode* createNode(double xmid, double ymid, double half_size) {
-    QuadNode* node = (QuadNode*)malloc(sizeof(QuadNode));
-    node->xmid = xmid;
-    node->ymid = ymid;
-    node->half_size = half_size;
-    node->mass = 0.0;
-    node->cm_x = 0.0;
-    node->cm_y = 0.0;
-    node->bodyIndex = -1;
-    node->NW = node->NE = node->SW = node->SE = NULL;
-    return node;
+static float tdiff(struct timeval* start, struct timeval* end) {
+    return (end->tv_sec - start->tv_sec) + 1e-6f*(end->tv_usec - start->tv_usec);
 }
 
-void insertBody(QuadNode* node, int i, Planet* bodies) {
-    if (node->bodyIndex == -1 && node->NW == NULL) {
-        node->bodyIndex = i;
-        node->mass = bodies[i].mass;
-        node->cm_x = bodies[i].x;
-        node->cm_y = bodies[i].y;
-        return;
-    }
-    double totalMass = node->mass + bodies[i].mass;
-    node->cm_x = (node->cm_x * node->mass + bodies[i].x * bodies[i].mass) / totalMass;
-    node->cm_y = (node->cm_y * node->mass + bodies[i].y * bodies[i].mass) / totalMass;
-    node->mass = totalMass;
-    if (node->NW == NULL) {
-        double hs = node->half_size / 2.0;
-        node->NW = createNode(node->xmid - hs, node->ymid + hs, hs);
-        node->NE = createNode(node->xmid + hs, node->ymid + hs, hs);
-        node->SW = createNode(node->xmid - hs, node->ymid - hs, hs);
-        node->SE = createNode(node->xmid + hs, node->ymid - hs, hs);
-        int oldIndex = node->bodyIndex;
-        node->bodyIndex = -1;
-        if (bodies[oldIndex].x <= node->xmid) {
-            if (bodies[oldIndex].y >= node->ymid) insertBody(node->NW, oldIndex, bodies);
-            else insertBody(node->SW, oldIndex, bodies);
-        } else {
-            if (bodies[oldIndex].y >= node->ymid) insertBody(node->NE, oldIndex, bodies);
-            else insertBody(node->SE, oldIndex, bodies);
-        }
-    }
-    if (bodies[i].x <= node->xmid) {
-        if (bodies[i].y >= node->ymid) insertBody(node->NW, i, bodies);
-        else insertBody(node->SW, i, bodies);
-    } else {
-        if (bodies[i].y >= node->ymid) insertBody(node->NE, i, bodies);
-        else insertBody(node->SE, i, bodies);
-    }
-}
+static double* mass_in; 
+static double* x_in;    
+static double* y_in;      
+static double* vx_in;
+static double* vy_in;   
 
-void computeForceBarnesHut(QuadNode* node, Planet* bodies, int i,
-                           double theta, double G, double softening,
-                           double* fx, double* fy)
+static double* mass_out;
+static double* x_out;
+static double* y_out;
+static double* vx_out;
+static double* vy_out;
+
+static int nplanets;
+static int timesteps;
+static double dt = 0.01;     
+static double G  = 6.6743;  
+
+void update_planets_SoA(int n)
 {
-    if (!node || node->mass <= 0.0) return;
-    double dx = node->cm_x - bodies[i].x;
-    double dy = node->cm_y - bodies[i].y;
-    double dist = sqrt(dx*dx + dy*dy) + softening;
-    if (node->NW == NULL) {
-        if (node->bodyIndex == i || node->bodyIndex < 0) return;
-        double F = G * bodies[i].mass * bodies[node->bodyIndex].mass / (dist*dist);
-        *fx += F * (dx/dist);
-        *fy += F * (dy/dist);
-        return;
-    }
-    double s = node->half_size * 2.0;
-    if (s / dist < theta) {
-        double F = G * bodies[i].mass * node->mass / (dist*dist);
-        *fx += F * (dx/dist);
-        *fy += F * (dy/dist);
-    } else {
-        computeForceBarnesHut(node->NW, bodies, i, theta, G, softening, fx, fy);
-        computeForceBarnesHut(node->NE, bodies, i, theta, G, softening, fx, fy);
-        computeForceBarnesHut(node->SW, bodies, i, theta, G, softening, fx, fy);
-        computeForceBarnesHut(node->SE, bodies, i, theta, G, softening, fx, fy);
-    }
-}
+    #pragma omp parallel for
+    for(int i=0; i<n; i++){
+        double xi   = x_in[i];
+        double yi   = y_in[i];
+        double vxi  = vx_in[i];
+        double vyi  = vy_in[i];
+        double mi   = mass_in[i];
+        double fx   = 0.0;
+        double fy   = 0.0;
 
-void freeTree(QuadNode* node) {
-    if (!node) return;
-    freeTree(node->NW);
-    freeTree(node->NE);
-    freeTree(node->SW);
-    freeTree(node->SE);
-    free(node);
-}
 
-void computeForceDirect(Planet* bodies, int n, int i, double G, double softening, double* fx, double* fy) {
-    double xi = bodies[i].x;
-    double yi = bodies[i].y;
-    for (int j = 0; j < n; j++) {
-        if (j == i) continue;
-        double dx = bodies[j].x - xi;
-        double dy = bodies[j].y - yi;
-        double distSqr = dx*dx + dy*dy + softening;
-        double dist = sqrt(distSqr);
-        double F = G * bodies[i].mass * bodies[j].mass / distSqr;
-        *fx += F * (dx/dist);
-        *fy += F * (dy/dist);
+        #pragma omp simd reduction(+:fx,fy)
+        for(int j=0; j<n; j++){
+            if(j == i) continue;
+            double dx = x_in[j] - xi;
+            double dy = y_in[j] - yi;
+            double distSqr = dx*dx + dy*dy + 1e-5; 
+            double dist = sqrt(distSqr);
+            double F    = G*(mi*mass_in[j]) / distSqr;
+            fx += F * (dx/dist);
+            fy += F * (dy/dist);
+        }
+        double ax = fx / mi;
+        double ay = fy / mi;
+        double newVx = vxi + dt*ax;
+        double newVy = vyi + dt*ay;
+        double newX  = xi  + dt*newVx;
+        double newY  = yi  + dt*newVy;
+
+        mass_out[i] = mi;  
+        vx_out[i]   = newVx;
+        vy_out[i]   = newVy;
+        x_out[i]    = newX;
+        y_out[i]    = newY;
     }
 }
 
-int main(int argc, char** argv) {
-    if (argc < 3) {
+int main(int argc, char** argv){
+    if(argc < 3){
         printf("Usage: %s <nplanets> <timesteps>\n", argv[0]);
         return 1;
     }
-    int nplanets = atoi(argv[1]);
-    int timesteps = atoi(argv[2]);
-    double dt = 0.01;
-    double G = 6.6743;
-    double softening = 1e-4;
-    Planet* planets = (Planet*)malloc(sizeof(Planet)*nplanets);
-    for (int i = 0; i < nplanets; i++) {
-        planets[i].mass = randomDouble() + 0.1;
-        planets[i].x = randomDouble() * 100.0 - 50.0;
-        planets[i].y = randomDouble() * 100.0 - 50.0;
-        planets[i].vx = randomDouble() * 5.0 - 2.5;
-        planets[i].vy = randomDouble() * 5.0 - 2.5;
-    }
+    nplanets = atoi(argv[1]);
+    timesteps= atoi(argv[2]);
 
-    double theta = 0.5;     
-    int SWITCH_STEP = 0; 
+    mass_in = (double*)aligned_alloc(64, nplanets*sizeof(double));
+    x_in    = (double*)aligned_alloc(64, nplanets*sizeof(double));
+    y_in    = (double*)aligned_alloc(64, nplanets*sizeof(double));
+    vx_in   = (double*)aligned_alloc(64, nplanets*sizeof(double));
+    vy_in   = (double*)aligned_alloc(64, nplanets*sizeof(double));
+
+    mass_out= (double*)aligned_alloc(64, nplanets*sizeof(double));
+    x_out   = (double*)aligned_alloc(64, nplanets*sizeof(double));
+    y_out   = (double*)aligned_alloc(64, nplanets*sizeof(double));
+    vx_out  = (double*)aligned_alloc(64, nplanets*sizeof(double));
+    vy_out  = (double*)aligned_alloc(64, nplanets*sizeof(double));
+
+    #pragma omp parallel for
+    for(int i=0; i<nplanets; i++){
+        mass_in[i] = randomDouble() + 0.1;
+        x_in[i]    = randomDouble()*100.0 - 50.0;
+        y_in[i]    = randomDouble()*100.0 - 50.0;
+        vx_in[i]   = randomDouble()* 5.0  - 2.5;
+        vy_in[i]   = randomDouble()* 5.0  - 2.5;
+    }
 
     struct timeval start, end;
     gettimeofday(&start, NULL);
 
-    for (int step = 0; step < timesteps; step++) {
-        if (step < SWITCH_STEP) {
-            double minX = planets[0].x, maxX = planets[0].x;
-            double minY = planets[0].y, maxY = planets[0].y;
-            for (int i = 1; i < nplanets; i++) {
-                if (planets[i].x < minX) minX = planets[i].x;
-                if (planets[i].x > maxX) maxX = planets[i].x;
-                if (planets[i].y < minY) minY = planets[i].y;
-                if (planets[i].y > maxY) maxY = planets[i].y;
-            }
-            double cx = 0.5*(minX + maxX);
-            double cy = 0.5*(minY + maxY);
-            double maxSpan = (maxX - minX) > (maxY - minY) ? (maxX - minX) : (maxY - minY);
-            QuadNode* root = createNode(cx, cy, 0.5*maxSpan+1e-6);
+    for(int step=0; step<timesteps; step++){
+        update_planets_SoA(nplanets);
+        double* tmp;
+        tmp = mass_in; mass_in = mass_out; mass_out = tmp;
+        tmp = x_in;    x_in    = x_out;    x_out    = tmp;
+        tmp = y_in;    y_in    = y_out;    y_out    = tmp;
+        tmp = vx_in;   vx_in   = vx_out;   vx_out   = tmp;
+        tmp = vy_in;   vy_in   = vy_out;   vy_out   = tmp;
 
-            for (int i = 0; i < nplanets; i++) {
-                insertBody(root, i, planets);
-            }
-
-            #pragma omp parallel for
-            for (int i = 0; i < nplanets; i++) {
-                double fx = 0.0, fy = 0.0;
-                computeForceBarnesHut(root, planets, i, theta, G, softening, &fx, &fy);
-                double ax = fx / planets[i].mass;
-                double ay = fy / planets[i].mass;
-                planets[i].vx += dt * ax;
-                planets[i].vy += dt * ay;
-            }
-            #pragma omp parallel for
-            for (int i = 0; i < nplanets; i++) {
-                planets[i].x += dt * planets[i].vx;
-                planets[i].y += dt * planets[i].vy;
-            }
-            freeTree(root);
-        } else {
-            #pragma omp parallel for
-            for (int i = 0; i < nplanets; i++) {
-                double fx = 0.0, fy = 0.0;
-                computeForceDirect(planets, nplanets, i, G, softening, &fx, &fy);
-                double ax = fx / planets[i].mass;
-                double ay = fy / planets[i].mass;
-                planets[i].vx += dt * ax;
-                planets[i].vy += dt * ay;
-            }
-            #pragma omp parallel for
-            for (int i = 0; i < nplanets; i++) {
-                planets[i].x += dt * planets[i].vx;
-                planets[i].y += dt * planets[i].vy;
-            }
-        }
-        if (step % 1000 == 0) {
-            printf("Step %d: last planet at (%.4f, %.4f)\n",
-                   step, planets[nplanets-1].x, planets[nplanets-1].y);
-        }
+      //   if(step % 1000 == 0){
+      //       printf("Step %d: last planet at (%.5f, %.5f)\n",
+      //              step, x_in[nplanets-1], y_in[nplanets-1]);
+      //   }
     }
-    gettimeofday(&end, NULL);
-    float runtime = tdiff(&start, &end);
-    printf("Total time: %.6f s\n", runtime);
-    printf("Final location (%.5f, %.5f)\n", planets[nplanets-1].x, planets[nplanets-1].y);
 
-    free(planets);
+    gettimeofday(&end, NULL);
+    float elapsed = tdiff(&start, &end);
+    printf("Total time: %.6f s\n", elapsed);
+    printf("Final location: (%.5f, %.5f)\n", x_in[nplanets-1], y_in[nplanets-1]);
+
+    free(mass_in);free(x_in);free(y_in);free(vx_in);free(vy_in);
+    free(mass_out);free(x_out);free(y_out);free(vx_out);free(vy_out);
     return 0;
 }
