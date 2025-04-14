@@ -45,23 +45,6 @@ typedef struct QuadNode {
     struct QuadNode* SE;
 } QuadNode;
 
-static unsigned long long seed = 100ULL;
-unsigned long long randomU64() {
-    seed ^= (seed << 21);
-    seed ^= (seed >> 35);
-    seed ^= (seed << 4);
-    return seed;
-}
-
-
-double randomDouble() {
-    unsigned long long a = randomU64() >> (64 - 26);
-    unsigned long long b = randomU64() >> (64 - 26);
-    return ((a << 27) + b) / (double)(1ULL << 53);
-}
-float tdiff(struct timeval* start, struct timeval* end) {
-    return (end->tv_sec - start->tv_sec) + 1e-6f * (end->tv_usec - start->tv_usec);
-}
 
 QuadNode* createNode(double xmid, double ymid, double half_size) {
     QuadNode* node = (QuadNode*)malloc(sizeof(QuadNode));
@@ -185,7 +168,7 @@ int main(int argc, char** argv) {
     }
 
     double theta = 0.5;     
-    int SWITCH_STEP = 2000; 
+    int SWITCH_STEP = 0; 
 
     struct timeval start, end;
     gettimeofday(&start, NULL);
